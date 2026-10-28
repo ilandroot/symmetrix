@@ -1,0 +1,22 @@
+point front_nose=(90,0,0)
+point wing_root=(0,16,0)
+point canopy_top=front_nose+(-80,0,23)
+point canopy_front=front_nose+(-55,0,12)
+point canopy_frame=front_nose+(-70,0,20)
+point canopy_back=front_nose+(-95,0,21)
+point tail_root_front=front_nose+(-147,0,18)
+point tail_top_front=tail_root_front+(-31,0,30)
+point tail_top_seg1=tail_root_front+(-13,0,6)
+point tail_top_seg2=tail_root_front+(-28,0,25)
+point tail_top_back=tail_top_front+(-13,0,0)
+point exhaust_center=front_nose+(-216,0,12)
+arc L1 front_nose canopy_front (0,0,2)
+arc L2 canopy_front canopy_frame (0,0,0.5)
+arc L3 canopy_frame canopy_top (0,0,0.5)
+arc L4 canopy_top canopy_back (0.5,0,0.8)
+arc L5 canopy_back tail_root_front
+arc L6 tail_root_front tail_top_seg1
+arc L7 tail_top_seg1 tail_top_seg2
+arc L8 tail_top_seg2 tail_top_front
+arc L9 tail_top_front tail_top_back
+scale 1.0

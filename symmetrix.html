@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Symmetrix Viewer</title>
+<style>
+    body {
+        margin: 0;
+        background: #222;
+        color: #ddd;
+        font-family: sans-serif;
+        overflow: hidden;
+    }
+
+    #container {
+        display: flex;
+        height: calc(100vh - 120px);
+    }
+
+    #leftPane, #rightPane {
+        flex: 1;
+        position: relative;
+        border: 1px solid #444;
+    }
+
+    #leftPane {
+        background: #111;
+    }
+
+    #rightPane {
+        background: #000;
+    }
+
+    canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+    }
+
+    #panel {
+        height: 120px;
+        background: #333;
+        border-top: 2px solid #555;
+        padding: 10px;
+    }
+
+    #panel h3 {
+        margin: 0;
+        padding: 0;
+        font-size: 18px;
+    }
+
+    .control-group {
+        margin-top: 10px;
+    }
+
+    input[type="file"] {
+        margin-right: 10px;
+    }
+
+    button {
+        padding: 6px 12px;
+        background: #555;
+        color: #eee;
+        border: 1px solid #777;
+        cursor: pointer;
+    }
+
+    button:hover {
+        background: #666;
+    }
+</style>
+</head>
+<body>
+
+<div id="container">
+    <div id="leftPane">
+        <canvas id="xzCanvas"></canvas>
+    </div>
+
+    <div id="rightPane">
+        <canvas id="threeCanvas"></canvas>
+    </div>
+</div>
+
+<div id="panel">
+    <h3>操作パネル（Symmetrix Viewer）</h3>
+
+    <div class="control-group">
+        <label>sf-script 読込：</label>
+        <input type="file" id="scriptFile" accept=".txt">
+        <button id="loadScriptBtn">読み込む</button>
+    </div>
+</div>
+
+<!-- Three.js 読み込み -->
+<script type="module">
+// viewer.js
+import * as THREE from "https://esm.sh/three@0.152.2";
+import { OrbitControls } from "https://esm.sh/three@0.152.2/examples/jsm/controls/OrbitControls.js";
+
+// Three.js Canvas
+const threeCanvas = document.getElementById("threeCanvas");
+//-- 3D utils S
+function parsePoints(lines) {
+    const points = {};
+
+    for (const line of lines) {
+        if (!line.startsWith("point")) continue;
+
+        const [, rest] = line.split("point ");
+        const [name, expr] = rest.split("=");
+
+        if (expr.includes("+")) {
+            const [baseName, offsetStr] = expr.split("+");
+            const base = points[baseName];
+
+            const offset = offsetStr
+                .replace("(", "")
+                .replace(")", "")
+                .split(",")
+                .map(Number);
+
+            points[name] = {
+                x: base.x + offset[0],
+                y: base.y + offset[1],
+                z: base.z + offset[2]
+            };
+
+        } else {
+            const nums = expr.replace("(", "").replace(")", "").split(",").map(Number);
+            points[name] = { x: nums[0], y: nums[1], z: nums[2] };
+        }
+    }
+
+    return points;
+}
+function parseArcs(lines, points) {
+    const arcs = {};
+
+    for (const line of lines) {
+        if (!line.startsWith("arc")) continue;
+
+        const tokens = line.split(" ");
+
+        const lineName = tokens[1];
+        const startName = tokens[2];
+        const endName = tokens[3];
+
+        const P0 = points[startName];
+        const P1 = points[endName];
+
+        const M = {
+            x: (P0.x + P1.x) / 2,
+            y: (P0.y + P1.y) / 2,
+            z: (P0.z + P1.z) / 2
+        };
+
+        let offset = { x: 0, y: 0, z: 0 };
+        let steps = 20;
+
+        if (line.includes("(")) {
+            const offsetStr = line.substring(line.indexOf("(") + 1, line.indexOf(")"));
+            const nums = offsetStr.split(",").map(Number);
+            offset = { x: nums[0], y: nums[1], z: nums[2] };
+
+            const after = line.substring(line.indexOf(")") + 1).trim();
+            if (after.length > 0) {
+                steps = Number(after);
+            }
+        }
+
+        const C = {
+            x: M.x + offset.x,
+            y: M.y + offset.y,
+            z: M.z + offset.z
+        };
+
+        const pts = [];
+        for (let i = 0; i <= steps; i++) {
+            const t = i / steps;
+            const mt = 1 - t;
+
+            const x = mt * mt * P0.x + 2 * mt * t * C.x + t * t * P1.x;
+            const y = mt * mt * P0.y + 2 * mt * t * C.y + t * t * P1.y;
+            const z = mt * mt * P0.z + 2 * mt * t * C.z + t * t * P1.z;
+
+            pts.push({ x, y, z });
+        }
+
+        arcs[lineName] = pts;
+    }
+
+    return arcs;
+}
+function applyScale(lines, points, arcs) {
+    let scale = 1.0;
+
+    for (const line of lines) {
+        if (line.startsWith("scale")) {
+            scale = Number(line.split(" ")[1]);
+        }
+    }
+
+    for (const key in points) {
+        points[key].x *= scale;
+        points[key].y *= scale;
+        points[key].z *= scale;
+    }
+
+    for (const key in arcs) {
+        arcs[key] = arcs[key].map(p => ({
+            x: p.x * scale,
+            y: p.y * scale,
+            z: p.z * scale
+        }));
+    }
+}
+//重心を求める
+function computeCenter(arcs) {
+    let sx = 0, sy = 0, sz = 0;
+    let count = 0;
+
+    for (const name in arcs) {
+        for (const p of arcs[name]) {
+            sx += p.x;
+            sy += p.y;
+            sz += p.z;
+            count++;
+        }
+    }
+
+    return {
+        x: sx / count,
+        y: sy / count,
+        z: sz / count
+    };
+}
+//全点を「重心の逆方向」に移動する（原点中心化）
+function centerModel(arcs, center) {
+    for (const name in arcs) {
+        arcs[name] = arcs[name].map(p => ({
+            x: p.x - center.x,
+            y: p.y - center.y,
+            z: p.z - center.z
+        }));
+    }
+}
+//スケールを指定して拡大縮小する
+function scaleModel(arcs, scale) {
+    for (const name in arcs) {
+        arcs[name] = arcs[name].map(p => ({
+            x: p.x * scale,
+            y: p.y * scale,
+            z: p.z * scale
+        }));
+    }
+}
+function computeBoundingBox(arcs) {
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+    for (const name in arcs) {
+        for (const p of arcs[name]) {
+            if (p.x < minX) minX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.z < minZ) minZ = p.z;
+
+            if (p.x > maxX) maxX = p.x;
+            if (p.y > maxY) maxY = p.y;
+            if (p.z > maxZ) maxZ = p.z;
+        }
+    }
+
+    return {
+        minX, minY, minZ,
+        maxX, maxY, maxZ,
+        sizeX: maxX - minX,
+        sizeY: maxY - minY,
+        sizeZ: maxZ - minZ
+    };
+}
+// === 原点からの座標軸を描画 ===
+function addAxes(scene, length = 200) {
+
+    // +X（赤）
+    {
+        const pts = [
+            new THREE.Vector3(0, 0, 0),
+            new THREE.Vector3(length, 0, 0)
+        ];
+        const geo = new THREE.BufferGeometry().setFromPoints(pts);
+        const mat = new THREE.LineBasicMaterial({ color: 0xff0000 });
+        scene.add(new THREE.Line(geo, mat));
+    }
+
+    // +Y（緑）
+    {
+        const pts = [
+            new THREE.Vector3(0, 0, 0),
+            new THREE.Vector3(0, length, 0)
+        ];
+        const geo = new THREE.BufferGeometry().setFromPoints(pts);
+        const mat = new THREE.LineBasicMaterial({ color: 0x00ff00 });
+        scene.add(new THREE.Line(geo, mat));
+    }
+
+    // +Z（青）
+    {
+        const pts = [
+            new THREE.Vector3(0, 0, 0),
+            new THREE.Vector3(0, 0, length)
+        ];
+        const geo = new THREE.BufferGeometry().setFromPoints(pts);
+        const mat = new THREE.LineBasicMaterial({ color: 0x0000ff });
+        scene.add(new THREE.Line(geo, mat));
+    }
+}
+
+//-- 3D utils E
+
+// --- sf-script 読込 ---
+document.getElementById("loadScriptBtn").addEventListener("click", () => {
+    const file = document.getElementById("scriptFile").files[0];
+    if (!file) {
+        alert("sf-script を選択してください");
+        return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+        const text = reader.result;
+        const lines = text.split("\n").map(s => s.trim()).filter(s => s.length > 0);
+
+        const arcs = parseSymmetrixScript(lines);  // point → arc → StreamLine
+        draw3D(arcs);                              // ★ ワイヤー表示
+    };
+    reader.readAsText(file);
+});
+
+// --- sf-script パーサー ---
+function parseSymmetrixScript(lines) {
+    const points = parsePoints(lines);
+    const arcs = parseArcs(lines, points);
+    applyScale(lines, points, arcs);
+    return arcs;
+}
+
+// --- 3D ワイヤー表示 ---
+function draw3D(arcs) {
+
+    // 原点中心化
+    const center = {x:0, y:0, z:0};// 中心は原点（固定）
+    centerModel(arcs, center);
+
+    // bounding box → 最大サイズ
+    const box = computeBoundingBox(arcs);
+    const maxSize = Math.max(box.sizeX, box.sizeY, box.sizeZ);
+
+    // Three.js 初期化
+    const renderer = new THREE.WebGLRenderer({ canvas: threeCanvas });
+    renderer.setSize(threeCanvas.clientWidth, threeCanvas.clientHeight);
+
+    const scene = new THREE.Scene();
+
+    const camera = new THREE.PerspectiveCamera(
+        45,
+        threeCanvas.clientWidth / threeCanvas.clientHeight,
+        0.1,
+        5000
+    );
+
+    // 上方向を +Z にする
+    camera.up.set(0, 0, 1);
+
+    // ★ モデルの大きさに応じて自動ズーム
+    const distance = maxSize * 2.5;
+    camera.position.set(distance, distance, distance);
+    camera.lookAt(0, 0, 0);
+
+    const controls = new OrbitControls(camera, threeCanvas);
+
+    //軸表示
+    addAxes(scene, maxSize * 1.2);
+
+    // arc をワイヤー表示
+    for (const name in arcs) {
+        const pts = arcs[name].map(p => new THREE.Vector3(p.x, p.y, p.z));
+        const geometry = new THREE.BufferGeometry().setFromPoints(pts);
+        const material = new THREE.LineBasicMaterial({ color: 0xffffff });
+        const line = new THREE.Line(geometry, material);
+        scene.add(line);
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+        renderer.render(scene, camera);
+    }
+    animate();
+}
+
+
+</script>
+</body>
+</html>
